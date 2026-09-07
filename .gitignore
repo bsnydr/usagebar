@@ -1,0 +1,7 @@
+.DS_Store
+# build.sh output; install.sh rebuilds it from UsageBar.swift, so it is never committed.
+build/
+# Local scratch that could carry personal usage data or a token if copied into the checkout.
+*.log
+*.jsonl
+.claude/

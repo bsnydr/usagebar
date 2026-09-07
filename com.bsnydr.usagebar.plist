@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.bsnydr.usagebar</string>
+    <key>AssociatedBundleIdentifiers</key>
+    <string>com.bsnydr.usagebar</string>
+
+    <!-- __HOME__ is replaced with your home directory by install.sh, which writes the result to
+         ~/Library/LaunchAgents/. Nothing in this file needs editing by hand. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/Applications/UsageBar.app/Contents/MacOS/UsageBar</string>
+    </array>
+
+    <!-- Start at login and restart after a crash; a normal Quit stays quit. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/usagebar.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/usagebar.log</string>
+</dict>
+</plist>
