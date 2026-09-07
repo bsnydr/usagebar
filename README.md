@@ -61,6 +61,11 @@ Re-running `install.sh` after editing `UsageBar.swift` rebuilds and restarts it.
 "added as a background item" notice; the item lives under System Settings › General › Login Items &
 Extensions. Allow notifications when asked on first launch. Log: `~/Library/Logs/usagebar.log`.
 
+If this is your own fork and you want it kept in sync, opt in once with `git config usagebar.autopush true`;
+from then on every successful reinstall also commits whatever changed and pushes it, and a message can be
+passed as the first argument: `./install.sh "Lower the warn threshold to 60"`. Nothing that failed to build
+is ever pushed, because the sync runs last.
+
 ### Expected output
 
 `install.sh` ends with:
@@ -263,7 +268,7 @@ Edit, then run `./install.sh`.
 UsageBar.swift               the whole app: Config, Claude and Codex fetchers, menu, notifications, --once self-test
 Info.plist                   bundle metadata; LSUIElement (no Dock icon), LSMinimumSystemVersion 14.0
 build.sh                     swiftc → build/UsageBar.app; Command Line Tools only, targets the host architecture
-install.sh                   build, copy to ~/Applications, write the LaunchAgent, start it (safe to re-run)
+install.sh                   build, copy to ~/Applications, write the LaunchAgent, start it, optionally commit + push (safe to re-run)
 uninstall.sh                 stop it, remove the LaunchAgent and the app
 com.bsnydr.usagebar.plist    LaunchAgent template; install.sh replaces __HOME__ and writes it to ~/Library/LaunchAgents
 .github/workflows/tests.yml  build + --once smoke test on a macOS runner
