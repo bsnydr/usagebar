@@ -1,0 +1,20 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: swiftc --version
+      - name: Build
+        run: ./build.sh
+      # The runner has no Claude or Codex sign-in, so this prints the two
+      # "not signed in" lines and exits 0; it proves the binary links and runs.
+      - name: Smoke test
+        run: build/UsageBar.app/Contents/MacOS/UsageBar --once | tee /dev/stderr | grep -q '^ChatGPT'

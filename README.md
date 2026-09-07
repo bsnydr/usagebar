@@ -1,5 +1,7 @@
 # usagebar
 
+[![tests](https://github.com/bsnydr/usagebar/actions/workflows/tests.yml/badge.svg)](https://github.com/bsnydr/usagebar/actions/workflows/tests.yml)
+
 A macOS menu-bar app that shows how much of your Claude (Pro or Max) and ChatGPT (Plus or Pro, via Codex)
 subscription limits you have used and when each window resets. It reads the usage samples the Claude desktop
 app already writes to disk, borrows the Claude Code CLI's sign-in read-only while one is valid, and reads the
@@ -264,6 +266,7 @@ build.sh                     swiftc → build/UsageBar.app; Command Line Tools o
 install.sh                   build, copy to ~/Applications, write the LaunchAgent, start it (safe to re-run)
 uninstall.sh                 stop it, remove the LaunchAgent and the app
 com.bsnydr.usagebar.plist    LaunchAgent template; install.sh replaces __HOME__ and writes it to ~/Library/LaunchAgents
+.github/workflows/tests.yml  build + --once smoke test on a macOS runner
 ```
 
 The bundle id and launchd label are `com.bsnydr.usagebar`. To use your own, change it in `Info.plist`, the
