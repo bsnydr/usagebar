@@ -4,14 +4,16 @@
 // Build: ./build.sh      Install + start at login: ./install.sh      Remove: ./uninstall.sh
 // Self-test (prints the numbers, no UI): build/UsageBar.app/Contents/MacOS/UsageBar --once
 //
-// Data sources (all read-only):
+// Data sources:
 //   Claude   1) The Claude Code CLI's sign-in (macOS Keychain item "Claude Code-credentials") -> GET
 //               api.anthropic.com/api/oauth/usage: exact numbers, reset times, per-model weekly windows.
-//               Only used while that sign-in is valid; UsageBar never refreshes or rewrites it (see README).
+//               UsageBar renews this sign-in itself well before it expires, writing the renewed pair back
+//               into the same Keychain item the CLI uses (one shared copy, never a separate one) — see README.
 //            2) Fallback, no credentials needed: the Claude desktop app's own usage samples in
 //               ~/Library/Application Support/Claude/plan-usage-history.json. Reset time is estimated.
-//   ChatGPT  ~/.codex/auth.json (the Codex sign-in) -> GET chatgpt.com/backend-api/wham/usage.
-//            These are the Codex limits included in the ChatGPT plan. Codex keeps the token fresh.
+//   ChatGPT  ~/.codex/auth.json (the Codex sign-in, read-only, never rewritten) -> GET
+//               chatgpt.com/backend-api/wham/usage. These are the Codex limits included in the ChatGPT plan.
+//               Codex keeps that token fresh itself.
 
 import AppKit
 import Foundation
@@ -34,8 +36,11 @@ enum Config {
     static let claudeTokenURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
     static let claudeClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
     static let claudeCLIService = "Claude Code-credentials"   // read-only
-    static let claudeOwnService = "UsageBar Claude"           // only used if claudeSelfRefresh is on
-    /// Off: refreshing rotates the refresh token, which signs the `claude` CLI out. See README before enabling.
+    /// Off: tried this (renew ahead of expiry, write back into the CLI's own Keychain item). The renewal call
+    /// itself (POST grant_type=refresh_token to Config.claudeTokenURL) got a persistent 429 rate_limit_error
+    /// in testing — unchanged across 80+ minutes and several approaches — while the real `claude` binary's own
+    /// internal refresh worked fine in the same window. Never confirmed working for a non-CLI caller; see
+    /// README ("About the Claude sign-in") before re-enabling.
     static let claudeSelfRefresh = false
     static let claudeUserAgentFallback = "claude-code/2.1.220"
     static let claudeAppHistory = ("~/Library/Application Support/Claude/plan-usage-history.json" as NSString).expandingTildeInPath
@@ -221,17 +226,17 @@ enum Claude {
         return Creds(raw: j)
     }
 
-    /// Only with claudeSelfRefresh: keeps a refreshed pair in UsageBar's own Keychain item, never the CLI's.
-    static func writeOwnKeychain(_ c: Creds) -> Bool {
+    /// Writes the renewed pair back into the CLI's own Keychain item — the one shared copy — so `claude` and
+    /// UsageBar are always looking at the same sign-in instead of two that can drift apart.
+    static func writeSharedKeychain(_ c: Creds) -> Bool {
         guard let d = try? JSONSerialization.data(withJSONObject: ["claudeAiOauth": c.oauth]), let s = String(data: d, encoding: .utf8) else { return false }
-        return Shell.run("/usr/bin/security", ["add-generic-password", "-U", "-s", Config.claudeOwnService, "-a", NSUserName(), "-w", s]).status == 0
+        return Shell.run("/usr/bin/security", ["add-generic-password", "-U", "-s", Config.claudeCLIService, "-a", NSUserName(), "-w", s]).status == 0
     }
 
-    /// The newest stored sign-in wins (the CLI's own item; plus UsageBar's copies when self-refresh is on).
+    /// The newest sign-in wins: the shared Keychain item, or the in-memory copy if a just-written Keychain
+    /// update hasn't round-tripped back through a read yet.
     static func loadCreds() -> Creds? {
-        var candidates = [readKeychain(Config.claudeCLIService)]
-        if Config.claudeSelfRefresh { candidates += [readKeychain(Config.claudeOwnService), refreshed] }
-        return candidates.compactMap { $0 }.max { ($0.expiresAt ?? .distantPast) < ($1.expiresAt ?? .distantPast) }
+        [readKeychain(Config.claudeCLIService), refreshed].compactMap { $0 }.max { ($0.expiresAt ?? .distantPast) < ($1.expiresAt ?? .distantPast) }
     }
 
     static func refresh(_ c: Creds) -> Creds? {
@@ -260,7 +265,7 @@ enum Claude {
             guard let fresh = refresh(creds) else { u.error = signInHint; return u }
             creds = fresh
             refreshed = fresh
-            if !writeOwnKeychain(fresh) { log("could not store the refreshed Claude sign-in in the Keychain; keeping it in memory") }
+            if !writeSharedKeychain(fresh) { log("could not store the renewed Claude sign-in in the Keychain; keeping it in memory") }
         }
         guard let token = creds.accessToken else { return nil }
         let r = HTTP.request(Config.claudeUsageURL, headers: ["Authorization": "Bearer \(token)", "anthropic-beta": "oauth-2025-04-20",

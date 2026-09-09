@@ -152,29 +152,39 @@ writes to the Claude Code Keychain item, and never logs a token.
 
 ### About the Claude sign-in
 
-Day to day the Claude figures come from the desktop app's samples, which is fine for percentages. The exact
-path (real reset times, per-model weekly windows) needs the `claude` command-line tool to be signed in:
+The exact path (real reset times, per-model weekly windows) needs the `claude` command-line tool to be signed
+in once:
 
 ```bash
 claude auth login
 ```
 
-Caveat: that sign-in only stays valid for about 8 hours unless something refreshes it, and only Claude Code
-itself refreshes it (the desktop app uses a separate sign-in). So unless you use `claude` in the Terminal
-regularly, UsageBar will fall back to the desktop-app samples most of the time. There is a switch in
-`UsageBar.swift` (`claudeSelfRefresh`) that lets UsageBar refresh the sign-in itself and keep its own copy in
-the Keychain; it is **off** because Anthropic rotates refresh tokens, so the first refresh would sign the
-`claude` command-line tool out until you log it in again. Turn it on only if you're happy with that trade.
+That sign-in's access token only lasts about 8 hours, and by default `claude` only renews it right before an
+actual request — never in the background while you're not using it. So unless you use `claude` in the
+Terminal (or Code tab) regularly, UsageBar will fall back to the desktop-app samples most of the time.
+
+**Tried and reverted: self-renewing it.** `Config.claudeSelfRefresh` exists to make UsageBar renew the sign-in
+itself, an hour ahead of expiry — a plain OAuth renewal call, not a model request, so it would cost no usage —
+and write the renewed pair back into the *same* Keychain item `claude` itself reads, never a separate copy
+(a separate copy would race the CLI's own renewals, since Anthropic rotates the refresh token on every use;
+one shared item can't race itself). The mechanism is sound on paper, but testing found the renewal call
+(`POST grant_type=refresh_token` to `Config.claudeTokenURL`) gets a persistent `429 rate_limit_error` from
+Anthropic when made as a bare HTTPS request — unchanged across 80+ minutes and several variations (different
+timing, adding a `claude-code` User-Agent) — while the real `claude` binary's own internal refresh worked
+fine in the same window. Never established whether that's a strict quota this testing burned through or a
+structural block on non-CLI callers; either way, it's off (`claudeSelfRefresh = false`) until someone confirms
+which. If you want to chase it further: capturing what the actual `claude` binary sends on its own refresh
+(network trace) would settle it, but be aware that repeated calls against Anthropic's auth endpoint is what
+triggered the extended rate-limiting in the first place.
 
 ## Key technical decisions and tradeoffs
 
 - **Never refresh or rewrite another app's token.** UsageBar reads the Claude Code CLI's Keychain item and
-  Codex's `auth.json`, sends each token only to its own service, and never writes either back. Anthropic
-  rotates refresh tokens on every refresh, so a third party refreshing the CLI's token would invalidate the
-  CLI's copy and sign it out. `Config.claudeSelfRefresh` exists as an opt-in that keeps a refreshed pair in
-  UsageBar's own Keychain item; it is off by default and I have not tested it. Tradeoff: exact Claude numbers
-  are only available for the roughly 8 hours after a `claude` sign-in, so most of the time the Claude figures
-  come from the desktop app with an estimated reset.
+  Codex's `auth.json`, sends each token only to its own service, and never writes either back. Tradeoff: exact
+  Claude numbers are only available for the roughly 8 hours after a `claude` sign-in, so most of the time the
+  Claude figures come from the desktop app with an estimated reset. Tried lifting this for Claude specifically
+  (renew in place, write back into the CLI's own shared item — see "About the Claude sign-in"); the renewal
+  call itself couldn't be gotten working reliably in testing, so it's reverted and off by default.
 - **The Claude desktop app's file as the credential-free primary source.** `plan-usage-history.json` is
   written every few minutes while the app runs and carries 5-hour and 7-day percentages. No credentials, no
   network. It has no reset time, so UsageBar estimates the 5-hour reset from the latest 0 → >0 transition plus
@@ -209,7 +219,9 @@ the Keychain; it is **off** because Anthropic rotates refresh tokens, so the fir
 
 ### What I'd improve
 
-- Test the self-refresh path properly or delete it.
+- Figure out why `Config.claudeSelfRefresh`'s renewal call gets a persistent 429 as a bare HTTPS request —
+  network-trace the real `claude` binary's own refresh to see what it sends differently — or delete the
+  feature if it turns out to be structurally blocked for non-CLI callers.
 - Split the file so the pure functions (`estimateFiveHourReset`, `jwtExpiry`, `resetText`, `Codex.window`)
   can be unit-tested.
 - A universal binary via `lipo` instead of building for the host architecture.
@@ -247,7 +259,7 @@ All knobs are at the top of `UsageBar.swift` in `Config`:
 | `warnAt` / `alertAt` | 70 / 90 | orange / red (plus `!`) thresholds |
 | `notifyAt` | 80, 95 | notification thresholds, once per window cycle |
 | `claudeGlyph` / `gptGlyph` | ✱ / ⬡ | the two menu-bar glyphs |
-| `claudeSelfRefresh` | false | let UsageBar refresh the Claude sign-in itself (see above before enabling) |
+| `claudeSelfRefresh` | false | let UsageBar renew the Claude sign-in itself (see "About the Claude sign-in" — the renewal call isn't confirmed working yet) |
 | `claudeUserAgentFallback` | `claude-code/2.1.220` | User-Agent for the Claude usage endpoint when no `claude` binary is around to ask |
 | `claudeAppHistory`, `codexAuthPath`, `logDir` | see file | where the inputs and the history log live |
 
