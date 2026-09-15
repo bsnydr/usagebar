@@ -115,7 +115,8 @@ Codex                ~/.codex/auth.json (read-only) → chatgpt.com          ─
 
 1. **Claude, exact path.** If the `claude` CLI's sign-in in the Keychain is still valid, UsageBar calls the
    usage endpoint with it and shows the 5-hour, weekly and per-model weekly windows with real reset times.
-   The sign-in is only read; if it has expired UsageBar says so and moves on.
+   The sign-in is only read. If it has expired while you are using Claude, UsageBar asks the CLI to renew it
+   (see [About the Claude sign-in](#about-the-claude-sign-in)); otherwise it says so and moves on.
 2. **Claude, everyday path.** Otherwise it reads the last sample the Claude desktop app wrote (`fh` = 5-hour %,
    `sd` = 7-day %, `xu` = extra usage). The file carries no reset time, so the 5-hour reset is estimated from
    when usage last rose from 0, plus five hours, and marked ≈. The weekly reset is shown as n/a.
@@ -159,9 +160,17 @@ in once:
 claude auth login
 ```
 
-That sign-in's access token only lasts about 8 hours, and by default `claude` only renews it right before an
-actual request — never in the background while you're not using it. So unless you use `claude` in the
-Terminal (or Code tab) regularly, UsageBar will fall back to the desktop-app samples most of the time.
+That sign-in's access token only lasts about 8 hours, and `claude` only renews it right before an actual
+request — never in the background. So when UsageBar finds it expired **while you are using Claude**, it runs
+the real `claude` once with a one-word Haiku message (no tools, no saved session, a minimal environment). The CLI
+renews its own sign-in on the way, and UsageBar reads the fresh one. UsageBar still never touches the token.
+
+"While you are using Claude" means the window the last live reading saw is still open, or the desktop app sampled
+5-hour usage in the last 30 minutes and no known reset has happened since. Any message starts a 5-hour window
+if none is open, so this rule keeps UsageBar from starting one while you are idle. It nudges at most once every
+30 minutes and logs each attempt to `~/Library/Logs/usagebar.log`. Costs and gaps: a sliver of usage about
+once every 8 hours of use; up to ~18 minutes of desktop-app figures at the start of a session, until the app's
+next sample shows the new window; and no nudge at all when the desktop app is not running.
 
 **Tried and reverted: self-renewing it.** `Config.claudeSelfRefresh` exists to make UsageBar renew the sign-in
 itself, an hour ahead of expiry — a plain OAuth renewal call, not a model request, so it would cost no usage —
@@ -181,8 +190,9 @@ triggered the extended rate-limiting in the first place.
 
 - **Never refresh or rewrite another app's token.** UsageBar reads the Claude Code CLI's Keychain item and
   Codex's `auth.json`, sends each token only to its own service, and never writes either back. Tradeoff: exact
-  Claude numbers are only available for the roughly 8 hours after a `claude` sign-in, so most of the time the
-  Claude figures come from the desktop app with an estimated reset. Tried lifting this for Claude specifically
+  Claude numbers depend on the CLI renewing its sign-in, which it only does for a request, so UsageBar nudges it
+  with a one-word Haiku message while you are using Claude (a sliver of usage); when you are not, the Claude
+  figures come from the desktop app with an estimated reset. Tried lifting this for Claude specifically
   (renew in place, write back into the CLI's own shared item — see "About the Claude sign-in"); the renewal
   call itself couldn't be gotten working reliably in testing, so it's reverted and off by default.
 - **The Claude desktop app's file as the credential-free primary source.** `plan-usage-history.json` is
@@ -240,8 +250,8 @@ triggered the extended rate-limiting in the first place.
   `chatgpt.com/backend-api/wham/usage`, `plan-usage-history.json`, and the shape of the Claude Code Keychain
   item. Any of them can change without notice, and the app will start showing an error line instead of
   numbers.
-- Exact Claude figures need a `claude` CLI sign-in that only the CLI keeps fresh; expect the desktop-app path
-  most of the time.
+- Exact Claude figures need a signed-in `claude` CLI. UsageBar keeps it fresh only while you are using Claude
+  and the desktop app is running; otherwise expect the desktop-app path.
 - Single user, single machine. The history log and the notification high-water marks live in this user's
   Library folder; nothing syncs.
 - Ad-hoc signed. Not notarised, not in the App Store, and I have only run it on Apple silicon; the Intel
