@@ -72,7 +72,7 @@ struct ProviderUsage {
     var error: String? = nil        // shown when no windows are available
     var note: String? = nil         // secondary hint shown under the numbers
     var lastKnown = false           // numbers are carried over from an earlier successful fetch
-    var headline: Double? { windows.first?.percent }
+    var headline: Double? { (windows.first { $0.label == "Weekly" } ?? windows.first)?.percent }   // menu-bar figure
     var worst: Double { windows.map(\.percent).max() ?? 0 }
     var structure: String { windows.map(\.label).joined(separator: "|") + "#\(extras.count)#\(error != nil)#\(note != nil)#\(lastKnown)" }
 }

@@ -9,7 +9,7 @@ Codex sign-in read-only for ChatGPT. It never refreshes or rewrites another app'
 dependencies, no Xcode project: it builds with the Command Line Tools and installs itself as a login item.
 
 ```
-✱ 61%  ⬡ 1%        <- menu bar: 5-hour window for Claude (✱) and ChatGPT/Codex (⬡)
+✱ 13%  ⬡ 0%        <- menu bar: weekly window for Claude (✱) and ChatGPT/Codex (⬡)
 ```
 
 Click it for the full picture:
@@ -126,7 +126,7 @@ Codex                ~/.codex/auth.json (read-only) → chatgpt.com          ─
    open Codex once.
 4. **A failed fetch never blanks a reading.** It keeps the previous numbers, marks them "last known", and
    shows the reason underneath.
-5. **Colour.** The menu-bar figure is each provider's 5-hour window. Normal below 70%, orange from 70%, red
+5. **Colour.** The menu-bar figure is each provider's weekly window (its first window if it has no weekly one). Normal below 70%, orange from 70%, red
    from 90% with a `!`; the colour reflects whichever of the 5-hour or weekly window is highest. Grey means
    the data is over 30 minutes old (for example the Claude app is not running); the menu says how old.
 6. **Notifications.** One macOS notification when a window crosses 80% and another at 95%, re-armed after
