@@ -7,8 +7,8 @@
 // Data sources:
 //   Claude   1) The Claude Code CLI's sign-in (macOS Keychain item "Claude Code-credentials") -> GET
 //               api.anthropic.com/api/oauth/usage: exact numbers, reset times, per-model weekly windows.
-//               When it has expired while you are using Claude, UsageBar has the `claude` CLI send a one-word
-//               Haiku message, which makes the CLI renew its own sign-in. UsageBar never writes the token — see README.
+//               Near expiry, UsageBar initializes the CLI protocol without sending a model prompt.
+//               The CLI renews its own sign-in. UsageBar never writes the token — see README.
 //            2) Fallback, no credentials needed: the Claude desktop app's own usage samples in
 //               ~/Library/Application Support/Claude/plan-usage-history.json. Reset time is estimated.
 //   ChatGPT  ~/.codex/auth.json (the Codex sign-in, read-only, never rewritten) -> GET
@@ -33,6 +33,7 @@ enum Config {
     static let gptGlyph = "⬡"
 
     static let claudeUsageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
+    static let claudeResetURL = URL(string: "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1")!
     static let claudeTokenURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
     static let claudeClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
     static let claudeCLIService = "Claude Code-credentials"   // read-only
@@ -42,7 +43,7 @@ enum Config {
     /// internal refresh worked fine in the same window. Never confirmed working for a non-CLI caller; see
     /// README ("About the Claude sign-in") before re-enabling.
     static let claudeSelfRefresh = false
-    static let claudeUserAgentFallback = "claude-code/2.1.220"
+    static let claudeUserAgentFallback = "claude-cli/2.1.291 (external, cli)"
     static let claudeAppHistory = ("~/Library/Application Support/Claude/plan-usage-history.json" as NSString).expandingTildeInPath
     static let claudeUsagePage = URL(string: "https://claude.ai/settings/usage")!
 
@@ -196,8 +197,10 @@ enum Claude {
     static var blockedUntil: Date = .distantPast       // after a 429
     static var lastRefreshFailure: Date = .distantPast
     static var refreshed: Creds?                        // self-refresh only: in-memory copy in case the Keychain write fails
-    static var fiveHourReset: Date?                     // from the last live reading that showed 5-hour usage
-    static var lastNudge: Date = .distantPast
+    static var lastCLIRenewal: Date = .distantPast
+    static var lastResetCheck: Date = .distantPast
+    static var resetGrants: [String: Any]?
+    static var resetGrantsToken: String?               // memory only; discard cached grants when the login changes
     static let signInHint = "exact reset times need a signed-in `claude` CLI — see README"
 
     static let cliPath = ["/opt/homebrew/bin/claude", "/usr/local/bin/claude", ("~/.local/bin/claude" as NSString).expandingTildeInPath]
@@ -207,7 +210,7 @@ enum Claude {
     static let userAgent: String = {
         if let path = cliPath, let v = Shell.run(path, ["--version"]).out.split(whereSeparator: { $0 == " " || $0 == "\n" }).first,
            v.filter({ $0 == "." }).count == 2 {
-            return "claude-code/\(v)"
+            return "claude-cli/\(v) (external, cli)"
         }
         return Config.claudeUserAgentFallback
     }()
@@ -263,7 +266,7 @@ enum Claude {
         guard var creds = stored, creds.accessToken != nil else { return nil }
         var u = ProviderUsage(name: "Claude", plan: planLabel(creds))
         if Date() < blockedUntil { u.error = "Claude API is rate-limiting; retrying later"; return u }
-        if (creds.expiresAt ?? .distantPast) < Date().addingTimeInterval(5 * 60) {
+        if (creds.expiresAt ?? .distantPast) <= Date() {
             guard let fresh = refresh(creds) else { u.error = signInHint; return u }
             creds = fresh
             refreshed = fresh
@@ -292,7 +295,6 @@ enum Claude {
             for (key, label) in [("five_hour", "5-hour"), ("seven_day", "Weekly")] {
                 guard let w = j[key] as? [String: Any], let p = num(w["utilization"]) else { continue }
                 let reset = parseISO(w["resets_at"] as? String)
-                if key == "five_hour", p > 0 { fiveHourReset = reset }
                 u.windows.append(UsageWindow(label: label, percent: p, resetsAt: reset, approx: false))
             }
             var scoped: [UsageWindow] = []   // per-model weekly windows, newer shape first
@@ -314,9 +316,54 @@ enum Claude {
                 } else if let p = num(x["utilization"]) { u.extras.append("Extra usage: \(pct(p)) of monthly cap") }
             }
             if u.windows.isEmpty { u.error = "Claude API returned no usage windows" }
+            if !u.windows.isEmpty { u.extras.append(resetAvailability(token: token)) }
             u.source = "API"
         }
         return u
+    }
+
+    /// Grant checks are separate from ordinary usage and limited to hourly: this variant is rate-limited
+    /// more heavily. It only reads availability; UsageBar never redeems a reset.
+    static func resetAvailability(token: String) -> String {
+        if resetGrantsToken != token || Date().timeIntervalSince(lastResetCheck) >= 3600 {
+            lastResetCheck = Date()
+            resetGrantsToken = token
+            resetGrants = nil
+            if case .success(let response) = HTTP.request(Config.claudeResetURL, headers: [
+                "Authorization": "Bearer \(token)", "anthropic-beta": "oauth-2025-04-20",
+                "Accept": "application/json", "User-Agent": userAgent
+            ]), response.status == 200 {
+                resetGrants = json(response.data)?["cedar_ember"] as? [String: Any]
+            } else {
+                log("claude reset availability unavailable; retrying in an hour")
+            }
+        }
+        return resetGrantSummary(resetGrants)
+    }
+
+    static func resetGrantSummary(_ block: [String: Any]?, now: Date = Date()) -> String {
+        guard let block = block, let grants = block["grants"] as? [[String: Any]],
+              (block["eligible"] as? Bool) == true else {
+            return "Reset availability unavailable — check Claude usage page"
+        }
+        let available = grants.filter {
+            guard let count = num($0["resets_left"]), count > 0 else { return false }
+            if let start = parseISO($0["starts_at"] as? String), start > now { return false }
+            if let end = parseISO($0["ends_at"] as? String), end <= now { return false }
+            return true
+        }
+        let count = available.reduce(0) { $0 + Int(num($1["resets_left"]) ?? 0) }
+        guard count > 0 else { return "No usage-limit resets available" }
+        var text = "\(count) usage-limit reset\(count == 1 ? "" : "s") available"
+        if let end = available.compactMap({ parseISO($0["ends_at"] as? String) }).min() {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "d MMM HH:mm"
+            text += " · \(count == 1 ? "expires" : "next expiry") \(formatter.string(from: end))"
+        }
+        if available.allSatisfy({ ($0["paused"] as? Bool) == true || ($0["usable_now"] as? Bool) == false }) {
+            text += " · not usable yet"
+        }
+        return text
     }
 
     /// Fallback: the Claude desktop app's own usage samples (fh = five-hour %, sd = seven-day %, xu = extra usage).
@@ -351,50 +398,48 @@ enum Claude {
         return nil
     }
 
-    /// You are using Claude right now: the window the last live reading saw is still open, or the desktop app sampled
-    /// usage in the last half hour and no known reset has happened since. A nudge outside this could start a window.
-    static func windowRunning() -> Bool {
-        if let r = fiveHourReset, r > Date() { return true }
-        guard let j = readJSONFile(Config.claudeAppHistory), let last = (j["samples"] as? [[String: Any]])?.last,
-              let t = num(last["t"]), let fh = num((last["u"] as? [String: Any])?["fh"]), fh > 0 else { return false }
-        let sampled = Date(timeIntervalSince1970: t / 1000)
-        guard Date().timeIntervalSince(sampled) <= Config.staleData else { return false }
-        if let r = fiveHourReset, r > sampled { return false }   // that sample's window has closed since
-        return true
-    }
+    // Only a protocol control message: no user message, model request, or new usage window.
+    static let renewalArguments = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+                                   "--tools", "", "--strict-mcp-config", "--disable-slash-commands",
+                                   "--setting-sources", "project", "--no-session-persistence"]
+    static let renewalInput = Data(("{\"type\":\"control_request\",\"request_id\":\"usagebar-auth\",\"request\":{\"subtype\":\"initialize\"}}\n").utf8)
 
-    /// The CLI renews its own sign-in right before any request, so a one-word Haiku message (no tools, no saved session)
-    /// leaves a fresh token in its Keychain item. UsageBar still never touches the token. At most once per 30 minutes.
+    /// CLI initialization renews its own sign-in without inference (verified with Claude Code 2.1.291).
+    /// No desktop activity gate is needed. Failed attempts are limited to once per 30 minutes.
     static func renewViaCLI() -> Creds? {
-        guard let path = cliPath, Date().timeIntervalSince(lastNudge) > 30 * 60 else { return nil }
-        lastNudge = Date()
+        guard let path = cliPath, Date().timeIntervalSince(lastCLIRenewal) > 30 * 60 else { return nil }
+        lastCLIRenewal = Date()
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
-        p.arguments = ["-p", "ok", "--model", "haiku", "--system-prompt", "Reply with one word.", "--tools", "", "--strict-mcp-config",
-                       "--disable-slash-commands", "--setting-sources", "project", "--no-session-persistence"]
+        p.arguments = renewalArguments
         // A minimal environment: an ANTHROPIC_API_KEY inherited from a shell would make the CLI bill that key instead.
         p.environment = ["HOME": NSHomeDirectory(), "USER": NSUserName(), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR": NSTemporaryDirectory()]
         p.currentDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory())   // no project CLAUDE.md or settings
-        p.standardInput = FileHandle.nullDevice; p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { log("claude CLI nudge could not start: \(error)"); return nil }
+        let input = Pipe()
+        p.standardInput = input; p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { log("claude CLI initialization could not start: \(error)"); return nil }
+        try? input.fileHandleForWriting.write(contentsOf: renewalInput)
+        try? input.fileHandleForWriting.close()
         let deadline = Date().addingTimeInterval(60)
         while p.isRunning && Date() < deadline { usleep(200_000) }
         let timedOut = p.isRunning
         if timedOut { p.terminate() }
         guard let c = readKeychain(Config.claudeCLIService), let exp = c.expiresAt, exp > Date() else {
-            log("claude CLI nudge did not renew the sign-in (\(timedOut ? "timed out" : "exit \(p.terminationStatus)")) — try `claude auth login`")
+            log("claude CLI initialization did not renew the sign-in (\(timedOut ? "timed out" : "exit \(p.terminationStatus)")) — try `claude auth login`")
             return nil
         }
-        log("claude CLI nudge: sign-in valid until \(ISO8601DateFormatter().string(from: exp))")
+        log("claude CLI initialization: sign-in valid until \(ISO8601DateFormatter().string(from: exp))")
         return c
     }
 
-    static func fetch() -> ProviderUsage {
-        var stored = loadCreds()
-        if let c = stored, (c.expiresAt ?? .distantPast) <= Date(), windowRunning(), let renewed = renewViaCLI() { stored = renewed }
-        let api = fromAPI(stored)
+    static func fetch(load: () -> Creds? = loadCreds, renew: () -> Creds? = renewViaCLI,
+                      readAPI: (Creds?) -> ProviderUsage? = fromAPI,
+                      readApp: (String) -> ProviderUsage? = { fromApp(plan: $0) }, now: Date = Date()) -> ProviderUsage {
+        var stored = load()
+        if let c = stored, (c.expiresAt ?? .distantPast) <= now.addingTimeInterval(5 * 60), let renewed = renew() { stored = renewed }
+        let api = readAPI(stored)
         if let a = api, !a.windows.isEmpty { return a }
-        if var app = fromApp(plan: planLabel(stored)) {
+        if var app = readApp(planLabel(stored)) {
             app.note = api?.error ?? signInHint
             return app
         }

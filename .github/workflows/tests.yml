@@ -14,6 +14,8 @@ jobs:
         run: swiftc --version
       - name: Build
         run: ./build.sh
+      - name: Claude renewal regression checks
+        run: bash test.sh
       # The runner has no Claude or Codex sign-in, so this prints the two
       # "not signed in" lines and exits 0; it proves the binary links and runs.
       - name: Smoke test

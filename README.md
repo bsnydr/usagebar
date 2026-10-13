@@ -87,7 +87,7 @@ ChatGPT · Plus  [API, just now]
   5-hour            0%    resets in 4h 59m
   Weekly            12%   resets Sat 13:53
   1 full-reset credit available
-(Claude API user agent: claude-code/2.1.220)
+(Claude API user agent: claude-cli/2.1.291 (external, cli))
 ```
 
 On a machine with nothing signed in it prints a "no data" line for Claude and a "not signed in" line for
@@ -115,8 +115,8 @@ Codex                ~/.codex/auth.json (read-only) → chatgpt.com          ─
 
 1. **Claude, exact path.** If the `claude` CLI's sign-in in the Keychain is still valid, UsageBar calls the
    usage endpoint with it and shows the 5-hour, weekly and per-model weekly windows with real reset times.
-   The sign-in is only read. If it has expired while you are using Claude, UsageBar asks the CLI to renew it
-   (see [About the Claude sign-in](#about-the-claude-sign-in)); otherwise it says so and moves on.
+   The sign-in is only read. Near expiry, UsageBar initializes the CLI protocol to let the CLI renew its own sign-in, without sending
+   a model prompt (see [About the Claude sign-in](#about-the-claude-sign-in)).
 2. **Claude, everyday path.** Otherwise it reads the last sample the Claude desktop app wrote (`fh` = 5-hour %,
    `sd` = 7-day %, `xu` = extra usage). The file carries no reset time, so the 5-hour reset is estimated from
    when usage last rose from 0, plus five hours, and marked ≈. The weekly reset is shown as n/a.
@@ -129,9 +129,13 @@ Codex                ~/.codex/auth.json (read-only) → chatgpt.com          ─
 5. **Colour.** The menu-bar figure is each provider's weekly window (its first window if it has no weekly one). Normal below 70%, orange from 70%, red
    from 90% with a `!`; the colour reflects whichever of the 5-hour or weekly window is highest. Grey means
    the data is over 30 minutes old (for example the Claude app is not running); the menu says how old.
-6. **Notifications.** One macOS notification when a window crosses 80% and another at 95%, re-armed after
+6. **Claude reset availability.** With a valid CLI sign-in, an hourly read of the optional reset-grants
+   response shows banked usage-limit resets and the next expiry. Expired grants are excluded. Missing or
+   failed reads show availability as unknown. UsageBar only displays resets; use the Claude usage page to
+   redeem one. The count may lag a redemption by up to an hour.
+7. **Notifications.** One macOS notification when a window crosses 80% and another at 95%, re-armed after
    the window resets. The high-water marks are stored, so a restart does not repeat them.
-7. **History.** Every poll appends one line to `~/Library/Application Support/UsageBar/history.jsonl`, e.g.
+8. **History.** Every poll appends one line to `~/Library/Application Support/UsageBar/history.jsonl`, e.g.
 
    ```json
    {"chatgpt":{"5-hour":1,"Weekly":0,"at":1788610990},"claude":{"5-hour":61,"Weekly":13,"at":1788610800},"t":1788611000}
@@ -144,9 +148,16 @@ Codex                ~/.codex/auth.json (read-only) → chatgpt.com          ─
 
 | Provider | Source | Notes |
 |---|---|---|
-| Claude (always available) | `~/Library/Application Support/Claude/plan-usage-history.json` | The Claude desktop app writes a usage sample every few minutes while it runs (`fh` = 5-hour %, `sd` = 7-day %, `xu` = extra usage). No credentials involved. It has no reset time, so UsageBar estimates the 5-hour reset from when usage last rose from 0 (marked ≈). |
+| Claude (always available) | `~/Library/Application Support/Claude/plan-usage-history.json` | The Claude desktop app writes usage samples while its own polling is active (`fh` = 5-hour %, `sd` = 7-day %, `xu` = extra usage). No credentials involved. It has no reset time, so UsageBar estimates the 5-hour reset from when usage last rose from 0 (marked ≈). |
 | Claude (exact, when available) | Claude Code CLI sign-in (Keychain item `Claude Code-credentials`) → `GET api.anthropic.com/api/oauth/usage` | Exact 5-hour / weekly / per-model utilisation with real reset times. Read-only: used only while the CLI's own sign-in is valid. |
 | ChatGPT | `~/.codex/auth.json` (Codex sign-in, read-only) → `GET chatgpt.com/backend-api/wham/usage` | The Codex limits that come with the ChatGPT plan: 5-hour and weekly windows with reset times, reset credits, and the "Reserve" bucket when the main one is exhausted. Codex keeps the token fresh; if it expires UsageBar says "open Codex once". |
+
+Claude reset availability is read separately from `GET api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1`,
+using the installed CLI's current User-Agent format. This optional response is checked at most hourly, including
+failed checks, to avoid its stricter rate limit; ordinary percentage polling stays at three minutes. A failed
+reset check never removes the usage bars. [OpenUsage's client implementation](https://github.com/robinebers/openusage/blob/main/Sources/OpenUsage/Providers/Claude/ClaudeUsageClient.swift)
+documents this read shape; the grant response was also verified against a live account. See
+[Anthropic's limit-reset explanation](https://support.claude.com/en/articles/17007452-what-is-a-limit-reset) for the product behaviour.
 
 UsageBar sends each credential only to the service it belongs to, never writes to Codex's auth file, never
 writes to the Claude Code Keychain item, and never logs a token.
@@ -160,17 +171,21 @@ in once:
 claude auth login
 ```
 
-That sign-in's access token only lasts about 8 hours, and `claude` only renews it right before an actual
-request — never in the background. So when UsageBar finds it expired **while you are using Claude**, it runs
-the real `claude` once with a one-word Haiku message (no tools, no saved session, a minimal environment). The CLI
-renews its own sign-in on the way, and UsageBar reads the fresh one. UsageBar still never touches the token.
+That sign-in's access token lasts about 8 hours. Near expiry, UsageBar starts the real `claude` CLI in
+streaming mode, sends only a protocol `initialize` control request, and closes its input. CLI initialization
+renews the CLI's own sign-in; UsageBar then reads it again. No user prompt is sent, no model is requested,
+and no conversation is saved. This was verified with Claude Code 2.1.291, including recovery from an expired
+sign-in. UsageBar still never writes credentials itself.
 
-"While you are using Claude" means the window the last live reading saw is still open, or the desktop app sampled
-5-hour usage in the last 30 minutes and no known reset has happened since. Any message starts a 5-hour window
-if none is open, so this rule keeps UsageBar from starting one while you are idle. It nudges at most once every
-30 minutes and logs each attempt to `~/Library/Logs/usagebar.log`. Costs and gaps: a sliver of usage about
-once every 8 hours of use; up to ~18 minutes of desktop-app figures at the start of a session, until the app's
-next sample shows the new window; and no nudge at all when the desktop app is not running.
+Attempts are limited to once every 30 minutes and logged to `~/Library/Logs/usagebar.log`. The command runs
+with a minimal environment so inherited API keys cannot change its authentication source. If initialization
+fails or the CLI is signed out, UsageBar keeps the desktop fallback and shows the sign-in hint.
+
+This replaces the old one-word Haiku nudge, which required a known active usage window. That created a
+recovery deadlock when Claude's desktop samples stopped updating: the sign-in expired, but stale samples
+could not prove an active window. The desktop app can pause its own polling when its menu has not been
+opened recently, so merely leaving Claude running does not guarantee fresh samples. Initialization does
+not send an inference request and therefore does not require that activity check.
 
 **Tried and reverted: self-renewing it.** `Config.claudeSelfRefresh` exists to make UsageBar renew the sign-in
 itself, an hour ahead of expiry — a plain OAuth renewal call, not a model request, so it would cost no usage —
@@ -190,21 +205,20 @@ triggered the extended rate-limiting in the first place.
 
 - **Never refresh or rewrite another app's token.** UsageBar reads the Claude Code CLI's Keychain item and
   Codex's `auth.json`, sends each token only to its own service, and never writes either back. Tradeoff: exact
-  Claude numbers depend on the CLI renewing its sign-in, which it only does for a request, so UsageBar nudges it
-  with a one-word Haiku message while you are using Claude (a sliver of usage); when you are not, the Claude
-  figures come from the desktop app with an estimated reset. Tried lifting this for Claude specifically
+  Claude numbers depend on the CLI sign-in and its protocol initialization behaviour. UsageBar initializes
+  the CLI near expiry without sending a model prompt; if that fails, the desktop fallback can be stale. Tried lifting this for Claude specifically
   (renew in place, write back into the CLI's own shared item — see "About the Claude sign-in"); the renewal
   call itself couldn't be gotten working reliably in testing, so it's reverted and off by default.
 - **The Claude desktop app's file as the credential-free primary source.** `plan-usage-history.json` is
-  written every few minutes while the app runs and carries 5-hour and 7-day percentages. No credentials, no
+  written while the desktop app's polling is active and carries 5-hour and 7-day percentages. No credentials, no
   network. It has no reset time, so UsageBar estimates the 5-hour reset from the latest 0 → >0 transition plus
-  five hours and marks it ≈. Tradeoff: the figure is only as fresh as the app's last sample (it turns grey
-  after 30 minutes without one), the weekly reset time is unknown, and the estimate gives up if the first
+  five hours and marks it ≈. Tradeoff: desktop polling can pause unless its own menu was opened recently; the figure is only as fresh
+  as the last sample (it turns grey after 30 minutes without one), the weekly reset time is unknown, and the estimate gives up if the first
   message after a reset went unsampled.
 - **One Swift file, no dependencies, no Xcode project.** `build.sh` runs `swiftc` from the Command Line Tools
   against AppKit and UserNotifications, copies `Info.plist` in and ad-hoc signs. The whole app reads in one
-  sitting and rebuilds in seconds. Tradeoff: no SwiftPM target, no unit tests (the file is top-level code and
-  cannot be imported), and no signing identity, so macOS shows its usual notices for an unsigned background
+  sitting and rebuilds in seconds. Tradeoff: no SwiftPM target; `bash test.sh` compiles the declarations with isolated regression checks.
+  There is no signing identity, so macOS shows its usual notices for an unsigned background
   item.
 - **In-place menu updates.** Replacing item views on an open `NSMenu` flickers on macOS 26. The menu is
   rebuilt only in `menuWillOpen`, before it is on screen, and when closed; a refresh that lands while it is
@@ -250,8 +264,9 @@ triggered the extended rate-limiting in the first place.
   `chatgpt.com/backend-api/wham/usage`, `plan-usage-history.json`, and the shape of the Claude Code Keychain
   item. Any of them can change without notice, and the app will start showing an error line instead of
   numbers.
-- Exact Claude figures need a signed-in `claude` CLI. UsageBar keeps it fresh only while you are using Claude
-  and the desktop app is running; otherwise expect the desktop-app path.
+- Exact Claude figures need a signed-in `claude` CLI. UsageBar asks the CLI to renew its sign-in through
+  protocol initialization; this depends on CLI behaviour verified with version 2.1.291. Desktop samples are
+  a fallback and may stop updating even while the desktop app is running.
 - Single user, single machine. The history log and the notification high-water marks live in this user's
   Library folder; nothing syncs.
 - Ad-hoc signed. Not notarised, not in the App Store, and I have only run it on Apple silicon; the Intel
@@ -270,7 +285,7 @@ All knobs are at the top of `UsageBar.swift` in `Config`:
 | `notifyAt` | 80, 95 | notification thresholds, once per window cycle |
 | `claudeGlyph` / `gptGlyph` | ✱ / ⬡ | the two menu-bar glyphs |
 | `claudeSelfRefresh` | false | let UsageBar renew the Claude sign-in itself (see "About the Claude sign-in" — the renewal call isn't confirmed working yet) |
-| `claudeUserAgentFallback` | `claude-code/2.1.220` | User-Agent for the Claude usage endpoint when no `claude` binary is around to ask |
+| `claudeUserAgentFallback` | `claude-cli/2.1.291 (external, cli)` | User-Agent for the Claude usage endpoint when no `claude` binary is around to ask |
 | `claudeAppHistory`, `codexAuthPath`, `logDir` | see file | where the inputs and the history log live |
 
 Edit, then run `./install.sh`.
@@ -287,6 +302,8 @@ Edit, then run `./install.sh`.
 ## Project layout
 
 ```
+test.sh                     isolated Claude renewal regression checks (no credentials or network)
+tests/ClaudeRenewal.swift    expired/near-expiry sign-in recovery and fallback checks
 UsageBar.swift               the whole app: Config, Claude and Codex fetchers, menu, notifications, --once self-test
 Info.plist                   bundle metadata; LSUIElement (no Dock icon), LSMinimumSystemVersion 14.0
 build.sh                     swiftc → build/UsageBar.app; Command Line Tools only, targets the host architecture
