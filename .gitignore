@@ -5,3 +5,13 @@ build/
 *.log
 *.jsonl
 .claude/
+# Credentials and local usage data must never be committed. .env.example is the one .env file meant to be shared
+# (publish.sh still only commits files named in its ALLOWED_PATHS).
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+auth.json
+plan-usage-history.json

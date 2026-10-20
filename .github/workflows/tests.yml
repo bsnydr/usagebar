@@ -10,12 +10,18 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Toolchain
         run: swiftc --version
       - name: Build
         run: ./build.sh
       - name: Claude renewal regression checks
         run: bash test.sh
+      # Throwaway local repositories only: no network, no GitHub access, and it never runs install.sh.
+      - name: Publish helper checks
+        run: bash tests/publish.sh
       # The runner has no Claude or Codex sign-in, so this prints the two
       # "not signed in" lines and exits 0; it proves the binary links and runs.
       - name: Smoke test

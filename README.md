@@ -61,10 +61,36 @@ Re-running `install.sh` after editing `UsageBar.swift` rebuilds and restarts it.
 "added as a background item" notice; the item lives under System Settings › General › Login Items &
 Extensions. Allow notifications when asked on first launch. Log: `~/Library/Logs/usagebar.log`.
 
-If this is your own fork and you want it kept in sync, opt in once with `git config usagebar.autopush true`;
-from then on every successful reinstall also commits whatever changed and pushes it, and a message can be
-passed as the first argument: `./install.sh "Lower the warn threshold to 60"`. Nothing that failed to build
-is ever pushed, because the sync runs last.
+### Publishing your changes (optional)
+
+Off by default. In a clone you can push from, opt in once:
+
+```bash
+git config usagebar.autopush true
+```
+
+From then on a successful `./install.sh` finishes by running `./publish.sh`, which commits your edits to the
+project's own files and pushes them to `main`. Pass a commit message as the first argument,
+`./install.sh "Lower the warn threshold to 60"`, or run `./publish.sh "message"` yourself at any time. The
+install reports `Install: ok` separately from the `Publish:` result (`pushed`, `up to date`, `disabled`,
+`stopped: <reason>`, or `local commit kept, push failed`). A publishing failure does not undo the install.
+
+- **Your own fork:** publishing only targets this project's GitHub address unless you say otherwise. Set your
+  own with `git config usagebar.publishRemote <URL>`, written exactly as `git remote get-url origin` prints
+  it, and `git config usagebar.publishBranch <branch>` if you don't use `main`.
+- It runs `bash test.sh` first and only publishes the files listed in `ALLOWED_PATHS` at the top of
+  `publish.sh`; add a new file to that list when you want it published.
+- Configure `user.name` and `user.email` explicitly. The helper builds the verified commit in a temporary
+  index; existing staged work makes it stop. Sparse or split indexes, skip-worktree and assume-unchanged
+  entries also make it stop. Automatic publishing skips commit hooks and the pre-push hook. Reference
+  transaction hooks and remote server hooks still apply. Use ordinary Git commands if you need the skipped hooks.
+- If anything unexpected is in the way (other changes, something already staged, a remote that has moved
+  ahead), it stops and says why without changing your files. It never fetches, merges, rebases or
+  force-pushes, so if the remote moved, fetch it and take a look first. The destination branch must already
+  exist. Unpublished merge commits require manual review and publication.
+- If the push fails after a commit was prepared, that reviewed commit stays local for a later retry.
+- A quick check refuses files that look like they contain a private key, an access token or a personal
+  home-directory path. It is a safety net, not a guarantee.
 
 ### Expected output
 
@@ -73,7 +99,11 @@ is ever pushed, because the sync runs last.
 ```
 Built build/UsageBar.app
 UsageBar is running and will start at login. Look for ✱ and ⬡ in the menu bar.
+Install: ok
+Publish: disabled
 ```
+
+`Publish: disabled` is normal unless you opted in to [publishing](#publishing-your-changes-optional).
 
 The same numbers without the UI, from the self-test:
 
@@ -298,19 +328,31 @@ Edit, then run `./install.sh`.
   (`~/Applications/UsageBar.app/Contents/MacOS/UsageBar --once` for the installed copy) to see exactly what
   each source returns.
 - "Claude: no data": open the Claude desktop app once so it writes a sample, or sign the CLI in.
+- `Publish: stopped: ...` after an install: the app is installed and running regardless. The lines above the
+  message name the file or reason; fix that and run `./publish.sh` again.
+
+## Development checks
+
+Run `bash test.sh` for the isolated Swift regression checks and `bash tests/publish.sh` for publishing
+behavior against disposable local Git repositories. The latter uses Python 3's standard library as a
+development dependency; the app and publishing helper do not need Python. These tests do not contact
+GitHub, read real sign-ins, or install the app.
 
 ## Project layout
 
 ```
 test.sh                     isolated Claude renewal regression checks (no credentials or network)
 tests/ClaudeRenewal.swift    expired/near-expiry sign-in recovery and fallback checks
+tests/publish.sh             checks publish.sh against throwaway local repositories (no network, no GitHub)
 UsageBar.swift               the whole app: Config, Claude and Codex fetchers, menu, notifications, --once self-test
 Info.plist                   bundle metadata; LSUIElement (no Dock icon), LSMinimumSystemVersion 14.0
 build.sh                     swiftc → build/UsageBar.app; Command Line Tools only, targets the host architecture
-install.sh                   build, copy to ~/Applications, write the LaunchAgent, start it, optionally commit + push (safe to re-run)
+install.sh                   build, copy to ~/Applications, write the LaunchAgent, start it, then run publish.sh (safe to re-run)
+publish.sh                   opt-in commit + push of the project's own files (the ALLOWED_PATHS list at its top)
 uninstall.sh                 stop it, remove the LaunchAgent and the app
 com.bsnydr.usagebar.plist    LaunchAgent template; install.sh replaces __HOME__ and writes it to ~/Library/LaunchAgents
-.github/workflows/tests.yml  build + --once smoke test on a macOS runner
+.gitignore                   keeps build output, logs and credential-looking files out of commits
+.github/workflows/tests.yml  build + regression checks + publish.sh checks + --once smoke test on a macOS runner
 ```
 
 The bundle id and launchd label are `com.bsnydr.usagebar`. To use your own, change it in `Info.plist`, the

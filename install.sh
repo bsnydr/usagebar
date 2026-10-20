@@ -4,7 +4,8 @@
 #
 # Optional: keep GitHub in sync. In a clone where you have push rights, run once
 #     git config usagebar.autopush true
-# and from then on a successful reinstall also commits any changes and pushes them.
+# and from then on a successful reinstall ends by running publish.sh, which commits the project's own files
+# and pushes them. A fork also sets usagebar.publishRemote to its own URL (see publish.sh and the README).
 # Pass a commit message as the first argument: ./install.sh "Lower the warn threshold to 60"
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -40,16 +41,10 @@ if [ "$registered" != true ]; then
 fi
 echo "UsageBar is running and will start at login. Look for ✱ and ⬡ in the menu bar."
 
-# Sync to GitHub, only when this clone opted in. Runs last, so nothing that failed to build is ever pushed.
-if [ "$(git config --get usagebar.autopush 2>/dev/null || true)" = "true" ]; then
-  if [ -n "$(git status --porcelain)" ]; then
-    git add -A
-    git commit -q -m "${1:-Update UsageBar}"
-    echo "Committed: $(git log -1 --format=%s)"
-  fi
-  if git push -q origin HEAD 2>/dev/null; then
-    echo "Pushed to $(git remote get-url origin)"
-  else
-    echo "warning: push to GitHub failed (offline?). Run 'git push' from $(pwd) when you are back online." >&2
-  fi
+# Publish last, so nothing that failed to build is ever committed. publish.sh prints its own "Publish: ..." result
+# line ("disabled" unless this clone opted in). The install above has already succeeded, so a publish stop or
+# failure is reported but never changes this script's exit status.
+echo "Install: ok"
+if ! bash ./publish.sh "${1:-Update UsageBar}"; then
+  echo "UsageBar is installed. Publishing did not complete; see the Publish: line above." >&2
 fi
