@@ -23,7 +23,7 @@ Claude · Max 20x
 ChatGPT · Plus
   5-hour   [░░░░░░░░░░]   1% · resets in 4h 59m
   Weekly   [░░░░░░░░░░]   0% · resets Sat 13:53
-  1 full-reset credit available
+  1 full-reset credit available · expires 22 Oct 22:34
   live · updated just now
 Refresh now            ⌘R
 Open Claude usage page
@@ -116,7 +116,7 @@ Claude · Max 20x  [Claude app, 6 min ago]
 ChatGPT · Plus  [API, just now]
   5-hour            0%    resets in 4h 59m
   Weekly            12%   resets Sat 13:53
-  1 full-reset credit available
+  1 full-reset credit available · expires 22 Oct 22:34
 (Claude API user agent: claude-cli/2.1.291 (external, cli))
 ```
 
@@ -153,7 +153,12 @@ Codex                ~/.codex/auth.json (read-only) → chatgpt.com          ─
 3. **ChatGPT.** It reads the Codex access token, checks the token's own expiry, and calls the usage endpoint:
    primary (5-hour) and secondary (weekly) windows with reset times, the "Reserve" bucket when the main one is
    exhausted, and any full-reset credits. Codex keeps that token fresh; if it has expired UsageBar asks you to
-   open Codex once.
+   open Codex once. When the usage response reports banked full-reset credits, a read-only request to the
+   reset-credits detail endpoint (at most every 15 minutes, failures included, and again when the sign-in,
+   account or credit count changes) adds the earliest expiry among credits that are still available, not
+   redeemed or pending, not expired and supported by your plan: "next expiry 22 Oct 22:34", or "expires …" for a
+   single credit. If that read fails or comes back unexpected, the line shows the count alone. This is the
+   expiry of the banked credits, not of the 5-hour or weekly window. UsageBar never redeems a credit.
 4. **A failed fetch never blanks a reading.** It keeps the previous numbers, marks them "last known", and
    shows the reason underneath.
 5. **Colour.** The menu-bar figure is each provider's weekly window (its first window if it has no weekly one). Normal below 70%, orange from 70%, red
@@ -180,7 +185,7 @@ Codex                ~/.codex/auth.json (read-only) → chatgpt.com          ─
 |---|---|---|
 | Claude (always available) | `~/Library/Application Support/Claude/plan-usage-history.json` | The Claude desktop app writes usage samples while its own polling is active (`fh` = 5-hour %, `sd` = 7-day %, `xu` = extra usage). No credentials involved. It has no reset time, so UsageBar estimates the 5-hour reset from when usage last rose from 0 (marked ≈). |
 | Claude (exact, when available) | Claude Code CLI sign-in (Keychain item `Claude Code-credentials`) → `GET api.anthropic.com/api/oauth/usage` | Exact 5-hour / weekly / per-model utilisation with real reset times. Read-only: used only while the CLI's own sign-in is valid. |
-| ChatGPT | `~/.codex/auth.json` (Codex sign-in, read-only) → `GET chatgpt.com/backend-api/wham/usage` | The Codex limits that come with the ChatGPT plan: 5-hour and weekly windows with reset times, reset credits, and the "Reserve" bucket when the main one is exhausted. Codex keeps the token fresh; if it expires UsageBar says "open Codex once". |
+| ChatGPT | `~/.codex/auth.json` (Codex sign-in, read-only) → `GET chatgpt.com/backend-api/wham/usage`, plus `GET chatgpt.com/backend-api/wham/rate-limit-reset-credits` for reset credit expiry | The Codex limits that come with the ChatGPT plan: 5-hour and weekly windows with reset times, reset credits with their next expiry, and the "Reserve" bucket when the main one is exhausted. Codex keeps the token fresh; if it expires UsageBar says "open Codex once". |
 
 Claude reset availability is read separately from `GET api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1`,
 using the installed CLI's current User-Agent format. This optional response is checked at most hourly, including
@@ -291,7 +296,7 @@ triggered the extended rate-limiting in the first place.
 - It cannot show the ChatGPT chat app's own caps (images per day, uploads). OpenAI exposes no read-only
   endpoint for those; the Codex windows are the account-level limits that are reachable programmatically.
 - It depends on private endpoints and file formats: `api.anthropic.com/api/oauth/usage`,
-  `chatgpt.com/backend-api/wham/usage`, `plan-usage-history.json`, and the shape of the Claude Code Keychain
+  `chatgpt.com/backend-api/wham/usage`, `chatgpt.com/backend-api/wham/rate-limit-reset-credits`, `plan-usage-history.json`, and the shape of the Claude Code Keychain
   item. Any of them can change without notice, and the app will start showing an error line instead of
   numbers.
 - Exact Claude figures need a signed-in `claude` CLI. UsageBar asks the CLI to renew its sign-in through
@@ -341,8 +346,9 @@ GitHub, read real sign-ins, or install the app.
 ## Project layout
 
 ```
-test.sh                     isolated Claude renewal regression checks (no credentials or network)
-tests/ClaudeRenewal.swift    expired/near-expiry sign-in recovery and fallback checks
+test.sh                     isolated regression checks (no credentials or network)
+tests/ClaudeRenewal.swift    expired/near-expiry sign-in recovery and fallback checks, Claude reset availability
+tests/CodexResetCredits.swift  ChatGPT reset credit expiry selection, fallback and cache checks
 tests/publish.sh             checks publish.sh against throwaway local repositories (no network, no GitHub)
 UsageBar.swift               the whole app: Config, Claude and Codex fetchers, menu, notifications, --once self-test
 Info.plist                   bundle metadata; LSUIElement (no Dock icon), LSMinimumSystemVersion 14.0

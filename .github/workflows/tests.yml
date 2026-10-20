@@ -17,7 +17,7 @@ jobs:
         run: swiftc --version
       - name: Build
         run: ./build.sh
-      - name: Claude renewal regression checks
+      - name: Regression checks
         run: bash test.sh
       # Throwaway local repositories only: no network, no GitHub access, and it never runs install.sh.
       - name: Publish helper checks

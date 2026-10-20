@@ -51,6 +51,7 @@ ALLOWED_PATHS=(
   publish.sh
   test.sh
   tests/ClaudeRenewal.swift
+  tests/CodexResetCredits.swift
   tests/publish.sh
   uninstall.sh
 )

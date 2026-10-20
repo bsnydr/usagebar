@@ -49,6 +49,7 @@ enum Config {
 
     static let codexAuthPath = ("~/.codex/auth.json" as NSString).expandingTildeInPath
     static let codexUsageURL = URL(string: "https://chatgpt.com/backend-api/wham/usage")!
+    static let codexResetCreditsURL = URL(string: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits")!
     static let codexUserAgent = "codex_cli_rs"
 
     static let logDir = ("~/Library/Application Support/UsageBar" as NSString).expandingTildeInPath
@@ -472,6 +473,65 @@ enum Codex {
         return UsageWindow(label: label, percent: p, resetsAt: num(w["reset_at"]).map { Date(timeIntervalSince1970: $0) }, approx: false)
     }
 
+    /// The usage response only carries the count of banked full-reset credits; their expiry dates come from a
+    /// separate read-only endpoint. That read is optional, so it is cached (failures included) and a failure
+    /// just leaves the date off. UsageBar never redeems a credit.
+    struct ResetCreditCache {
+        let key: String
+        let fetchedAt: Date
+        let credits: [[String: Any]]?       // nil: the read failed or was malformed
+    }
+    static var resetCreditCache: ResetCreditCache?
+    static let resetCreditTTL: TimeInterval = 15 * 60
+
+    /// Cached for 15 minutes; a different sign-in, account or available count forces a new read, and a count of
+    /// zero clears the cache without reading. Raw credits are
+    /// cached, not the rendered date, so expiry is re-checked against the current time on every poll.
+    static func resetCreditDetails(token: String, account: String, count: Int, now: Date = Date(),
+                                   read: () -> [[String: Any]]?) -> [[String: Any]]? {
+        guard count > 0 else { resetCreditCache = nil; return nil }
+        let key = "\(token)|\(account)|\(count)"
+        if let c = resetCreditCache, c.key == key, now.timeIntervalSince(c.fetchedAt) >= 0,
+           now.timeIntervalSince(c.fetchedAt) < resetCreditTTL { return c.credits }
+        let credits = read()
+        resetCreditCache = ResetCreditCache(key: key, fetchedAt: now, credits: credits)
+        return credits
+    }
+
+    static func readResetCredits(token: String, account: String) -> [[String: Any]]? {
+        if case .success(let resp) = HTTP.request(Config.codexResetCreditsURL, headers: [
+            "Authorization": "Bearer \(token)", "ChatGPT-Account-Id": account,
+            "Accept": "application/json", "User-Agent": Config.codexUserAgent
+        ]), resp.status == 200, let credits = json(resp.data)?["credits"] as? [[String: Any]] {
+            return credits
+        }
+        log("chatgpt reset credit expiry unavailable; retrying in \(Int(resetCreditTTL / 60)) min")
+        return nil
+    }
+
+    /// Earliest expiry among credits that are still available: not pending, not redeemed, not expired,
+    /// full-reset type and supported by the plan. Anything else is ignored rather than guessed at.
+    static func nextResetCreditExpiry(_ credits: [[String: Any]]?, now: Date = Date()) -> Date? {
+        func absent(_ v: Any?) -> Bool { v == nil || v is NSNull }
+        return (credits ?? []).compactMap { c -> Date? in
+            guard (c["status"] as? String) == "available", (c["reset_type"] as? String) == "codex_rate_limits",
+                  (c["is_supported_by_plan"] as? Bool) == true,
+                  absent(c["redeem_started_at"]), absent(c["redeemed_at"]),
+                  let end = parseISO(c["expires_at"] as? String), end > now else { return nil }
+            return end
+        }.min()
+    }
+
+    static func resetCreditSummary(count: Int, credits: [[String: Any]]?, now: Date = Date()) -> String {
+        var text = "\(count) full-reset credit\(count == 1 ? "" : "s") available"
+        if let end = nextResetCreditExpiry(credits, now: now) {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "d MMM HH:mm"
+            text += " · \(count == 1 ? "expires" : "next expiry") \(formatter.string(from: end))"
+        }
+        return text
+    }
+
     static func fetch() -> ProviderUsage {
         var u = ProviderUsage(name: "ChatGPT", plan: "")
         guard FileManager.default.fileExists(atPath: Config.codexAuthPath) else { u.error = "ChatGPT: not signed in — open Codex and sign in"; return u }
@@ -506,7 +566,12 @@ enum Codex {
                 u.windows.append(UsageWindow(label: "\(w.label) · \(label)", percent: w.percent, resetsAt: w.resetsAt, approx: false))
             }
             if let rc = j["rate_limit_reset_credits"] as? [String: Any], let n = num(rc["available_count"]), n > 0 {
-                u.extras.append("\(Int(n)) full-reset credit\(n == 1 ? "" : "s") available")
+                let credits = resetCreditDetails(token: token, account: account, count: Int(n)) {
+                    readResetCredits(token: token, account: account)
+                }
+                u.extras.append(resetCreditSummary(count: Int(n), credits: credits))
+            } else {
+                resetCreditCache = nil      // zero or missing count: never revive credits from an earlier count
             }
             if let c = j["credits"] as? [String: Any], (c["has_credits"] as? Bool) == true, let bal = c["balance"] as? String {
                 u.extras.append("Credits balance: \(bal)")
