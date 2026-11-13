@@ -164,10 +164,10 @@ Codex                ~/.codex/auth.json (read-only) → chatgpt.com          ─
 5. **Colour.** The menu-bar figure is each provider's weekly window (its first window if it has no weekly one). Normal below 70%, orange from 70%, red
    from 90% with a `!`; the colour reflects whichever of the 5-hour or weekly window is highest. Grey means
    the data is over 30 minutes old (for example the Claude app is not running); the menu says how old.
-6. **Claude reset availability.** With a valid CLI sign-in, an hourly read of the optional reset-grants
+6. **Claude reset availability.** With a valid CLI sign-in, a read every 3 hours of the optional reset-grants
    response shows banked usage-limit resets and the next expiry. Expired grants are excluded. Missing or
    failed reads show availability as unknown. UsageBar only displays resets; use the Claude usage page to
-   redeem one. The count may lag a redemption by up to an hour.
+   redeem one. The count may lag a redemption by up to 3 hours.
 7. **Notifications.** One macOS notification when a window crosses 80% and another at 95%, re-armed after
    the window resets. The high-water marks are stored, so a restart does not repeat them.
 8. **History.** Every poll appends one line to `~/Library/Application Support/UsageBar/history.jsonl`, e.g.
@@ -183,14 +183,17 @@ Codex                ~/.codex/auth.json (read-only) → chatgpt.com          ─
 
 | Provider | Source | Notes |
 |---|---|---|
-| Claude (always available) | `~/Library/Application Support/Claude/plan-usage-history.json` | The Claude desktop app writes usage samples while its own polling is active (`fh` = 5-hour %, `sd` = 7-day %, `xu` = extra usage). No credentials involved. It has no reset time, so UsageBar estimates the 5-hour reset from when usage last rose from 0 (marked ≈). |
+| Claude (always available) | `~/Library/Application Support/Claude/plan-usage-history.json` | The Claude desktop app writes usage samples while its own polling is active (`fh` = 5-hour %, `sd` = 7-day %, `xu` = extra usage). No credentials involved. It has no reset time, so UsageBar estimates the 5-hour reset from when usage last rose from 0 (marked ≈). **Known stall (2026-11-10):** the file was observed frozen about 20 h old while Claude Desktop's usage page showed fresh numbers, and viewing usage did not update it, so this source may be obsolete; UsageBar uses it only when it is newer than the last good API reading. |
 | Claude (exact, when available) | Claude Code CLI sign-in (Keychain item `Claude Code-credentials`) → `GET api.anthropic.com/api/oauth/usage` | Exact 5-hour / weekly / per-model utilisation with real reset times. Read-only: used only while the CLI's own sign-in is valid. |
 | ChatGPT | `~/.codex/auth.json` (Codex sign-in, read-only) → `GET chatgpt.com/backend-api/wham/usage`, plus `GET chatgpt.com/backend-api/wham/rate-limit-reset-credits` for reset credit expiry | The Codex limits that come with the ChatGPT plan: 5-hour and weekly windows with reset times, reset credits with their next expiry, and the "Reserve" bucket when the main one is exhausted. Codex keeps the token fresh; if it expires UsageBar says "open Codex once". |
 
 Claude reset availability is read separately from `GET api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1`,
-using the installed CLI's current User-Agent format. This optional response is checked at most hourly, including
-failed checks, to avoid its stricter rate limit; ordinary percentage polling stays at three minutes. A failed
-reset check never removes the usage bars. [OpenUsage's client implementation](https://github.com/robinebers/openusage/blob/main/Sources/OpenUsage/Providers/Claude/ClaudeUsageClient.swift)
+using the installed CLI's current User-Agent format. This is the same endpoint as the usage poll, so it shares
+its rate limit, but the `skip_spend` variant is not known to return the same payload, so it stays a separate
+request: at most every 3 hours (failed checks included; it adds about 1.7% to the request count at 3-minute
+polling), only right after a successful usage call, with its own cooldown (a long `Retry-After` is honoured)
+that never pauses usage polling. A failed read keeps the previous grants for the same sign-in. Ordinary
+percentage polling stays at three minutes. A failed reset check never removes the usage bars. [OpenUsage's client implementation](https://github.com/robinebers/openusage/blob/main/Sources/OpenUsage/Providers/Claude/ClaudeUsageClient.swift)
 documents this read shape; the grant response was also verified against a live account. See
 [Anthropic's limit-reset explanation](https://support.claude.com/en/articles/17007452-what-is-a-limit-reset) for the product behaviour.
 
@@ -261,8 +264,16 @@ triggered the extended rate-limiting in the first place.
   new per-model window appearing) while the menu is open waits for the next open, and there are two update
   paths to keep in sync.
 - **3-minute polling with refresh on open, on wake and on demand.** A fixed timer, a refresh when the menu
-  opens if the data is over a minute old, a refresh 15 seconds after wake, and ⌘R. A 429 from the Claude API
-  backs off for at least 10 minutes. Neither provider pushes. Tradeoff: up to three minutes of lag, and a
+  opens if the data is over a minute old, a refresh 15 seconds after wake, and ⌘R. A 429 or 5xx from the Claude
+  API starts a cooldown saved in `~/Library/Application Support/UsageBar/claude-backoff.json` (so it survives
+  restarts): the `Retry-After` header if present (honoured in full, however long; only values under a minute are raised to
+  a minute), otherwise 10 minutes doubling per consecutive failure up to 2 hours; a success clears it. The file
+  holds only a time and a count. No usage-endpoint request is made during the cooldown, and the menu shows the
+  next try time. The newest good API reading is kept in memory only, tied to the current sign-in, so a different
+  login never sees another account's numbers (a token renewal also drops it, and a restart loses it). When the
+  API is failing, a desktop-app sample replaces it only if the sample is newer, otherwise it is shown as "last
+  known numbers · <age>" with the reason underneath.
+  Neither provider pushes. Tradeoff: up to three minutes of lag, and a
   fetch every three minutes against endpoints that were not designed for a third-party poller.
 - **A failed refresh never blanks a reading.** `carryForward` keeps the previous numbers, flags them "last
   known" and shows the error underneath. Tradeoff: stale numbers can pass for current at a glance; the grey

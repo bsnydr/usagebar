@@ -195,11 +195,71 @@ enum Claude {
         var scopes: [String] { oauth["scopes"] as? [String] ?? [] }
     }
 
-    static var blockedUntil: Date = .distantPast       // after a 429
+    /// Cooldown after a rate limit or server error lives in a small file (no tokens or identifiers) so a
+    /// restart or login-item relaunch does not immediately hit the endpoint again. Tests point this at a temp dir.
+    static var stateDir = Config.logDir
+    static var backoffPath: String { stateDir + "/claude-backoff.json" }
+    static let backoffBase: TimeInterval = 10 * 60
+    static let backoffCap: TimeInterval = 2 * 3600
+
+    struct Backoff { var until: Date; var failures: Int }
+
+    static func loadBackoff() -> Backoff {
+        guard let j = readJSONFile(backoffPath), let t = num(j["until"]) else { return Backoff(until: .distantPast, failures: 0) }
+        return Backoff(until: Date(timeIntervalSince1970: t), failures: Int(num(j["failures"]) ?? 0))
+    }
+    static func saveBackoff(_ b: Backoff) {
+        try? FileManager.default.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
+        let j: [String: Any] = ["until": b.until.timeIntervalSince1970, "failures": b.failures]
+        if let d = try? JSONSerialization.data(withJSONObject: j) { try? d.write(to: URL(fileURLWithPath: backoffPath), options: .atomic) }
+    }
+    static var blockedUntil: Date { loadBackoff().until }
+
+    /// Retry-After may be seconds or an HTTP date. Honoured in full, never shortened (the
+    /// one-minute floor only guards against 0); without one,
+    /// 10 min doubling per consecutive failure up to 2 h.
+    static func retryDelay(retryAfter: String?, failures: Int, now: Date) -> TimeInterval {
+        if let h = retryAfter?.trimmingCharacters(in: .whitespaces), !h.isEmpty {
+            var secs = Double(h)
+            if secs == nil {
+                let f = DateFormatter()
+                f.locale = Locale(identifier: "en_US_POSIX"); f.timeZone = TimeZone(identifier: "GMT")
+                f.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+                secs = f.date(from: h).map { $0.timeIntervalSince(now) }
+            }
+            if let s = secs, s.isFinite { return max(s, 60) }
+        }
+        return min(backoffBase * pow(2, Double(max(failures - 1, 0))), backoffCap)
+    }
+
+    /// Records a failed usage-endpoint call (429, 5xx) and returns the time of the next permitted attempt.
+    @discardableResult
+    static func noteFailure(retryAfter: String?, now: Date = Date()) -> Date {
+        let failures = loadBackoff().failures + 1
+        let until = now.addingTimeInterval(retryDelay(retryAfter: retryAfter, failures: failures, now: now))
+        saveBackoff(Backoff(until: until, failures: failures))
+        return until
+    }
+    static func noteSuccess() {
+        if loadBackoff().failures > 0 { saveBackoff(Backoff(until: .distantPast, failures: 0)) }
+    }
+    static func clockTime(_ d: Date) -> String {
+        let f = DateFormatter(); f.dateFormat = "HH:mm"; return f.string(from: d)
+    }
+
+    /// Newest good API reading: memory only, tied to the access token that produced it, so a different login
+    /// never sees the previous account's numbers. Nothing identifying is written to disk. A token renewal also
+    /// drops it, which errs on the side of showing less rather than another account's data.
+    static var lastGood: (token: String, usage: ProviderUsage)?
+    static func lastGood(for token: String?) -> ProviderUsage? {
+        guard let g = lastGood, let t = token, g.token == t else { lastGood = nil; return nil }
+        return g.usage
+    }
+
     static var lastRefreshFailure: Date = .distantPast
     static var refreshed: Creds?                        // self-refresh only: in-memory copy in case the Keychain write fails
     static var lastCLIRenewal: Date = .distantPast
-    static var lastResetCheck: Date = .distantPast
+    static var resetNextCheck: Date = .distantPast     // its own cooldown: reset-read failures never pause usage polling
     static var resetGrants: [String: Any]?
     static var resetGrantsToken: String?               // memory only; discard cached grants when the login changes
     static let signInHint = "exact reset times need a signed-in `claude` CLI — see README"
@@ -266,7 +326,8 @@ enum Claude {
     static func fromAPI(_ stored: Creds?) -> ProviderUsage? {
         guard var creds = stored, creds.accessToken != nil else { return nil }
         var u = ProviderUsage(name: "Claude", plan: planLabel(creds))
-        if Date() < blockedUntil { u.error = "Claude API is rate-limiting; retrying later"; return u }
+        let blocked = blockedUntil
+        if Date() < blocked { u.error = "Claude API is rate-limiting; next try \(clockTime(blocked))"; return u }
         if (creds.expiresAt ?? .distantPast) <= Date() {
             guard let fresh = refresh(creds) else { u.error = signInHint; return u }
             creds = fresh
@@ -285,9 +346,11 @@ enum Claude {
                 case 401: u.error = signInHint
                 case 403: u.error = "Claude sign-in lacks the usage permission — run `claude auth login` again"
                 case 429:
-                    let retry = num(resp.headers["retry-after"]) ?? 0
-                    blockedUntil = Date().addingTimeInterval(max(retry, 10 * 60))
-                    u.error = "Claude API is rate-limiting; retrying later"
+                    let until = noteFailure(retryAfter: resp.headers["retry-after"])
+                    u.error = "Claude API is rate-limiting; next try \(clockTime(until))"
+                case 500...599:
+                    let until = noteFailure(retryAfter: resp.headers["retry-after"])
+                    u.error = "Claude API error \(resp.status); next try \(clockTime(until))"
                 default: u.error = "Claude API error \(resp.status)"
                 }
                 log("claude api: \(u.error ?? "")")
@@ -317,29 +380,41 @@ enum Claude {
                 } else if let p = num(x["utilization"]) { u.extras.append("Extra usage: \(pct(p)) of monthly cap") }
             }
             if u.windows.isEmpty { u.error = "Claude API returned no usage windows" }
-            if !u.windows.isEmpty { u.extras.append(resetAvailability(token: token)) }
+            if !u.windows.isEmpty { noteSuccess(); u.extras.append(resetAvailability(token: token)) }
             u.source = "API"
         }
         return u
     }
 
-    /// Grant checks are separate from ordinary usage and limited to hourly: this variant is rate-limited
-    /// more heavily. It only reads availability; UsageBar never redeems a reset.
+    /// Grant checks hit the same usage endpoint (a query-string variant), so they count against the same rate
+    /// limit: at most every 3 hours, only right after a successful usage call. Its payload is not established to
+    /// match the plain usage response (`skip_spend`), so it stays a separate request with its own cooldown: a
+    /// failure here (including a long Retry-After) only delays the next reset read and never pauses usage
+    /// polling. A failed read keeps the previous grants for the same sign-in. Read-only; never redeems.
+    static let resetCheckInterval: TimeInterval = 3 * 3600
     static func resetAvailability(token: String) -> String {
-        if resetGrantsToken != token || Date().timeIntervalSince(lastResetCheck) >= 3600 {
-            lastResetCheck = Date()
-            resetGrantsToken = token
-            resetGrants = nil
-            if case .success(let response) = HTTP.request(Config.claudeResetURL, headers: [
+        if resetGrantsToken != token { resetGrants = nil; resetGrantsToken = token }
+        if Date() >= resetNextCheck {
+            resetNextCheck = Date().addingTimeInterval(resetCheckInterval)
+            let r = HTTP.request(Config.claudeResetURL, headers: [
                 "Authorization": "Bearer \(token)", "anthropic-beta": "oauth-2025-04-20",
                 "Accept": "application/json", "User-Agent": userAgent
-            ]), response.status == 200 {
+            ])
+            if case .success(let response) = r, response.status == 200 {
                 resetGrants = json(response.data)?["cedar_ember"] as? [String: Any]
             } else {
-                log("claude reset availability unavailable; retrying in an hour")
+                if case .success(let response) = r, response.status == 429 || (500...599).contains(response.status) {
+                    noteResetFailure(retryAfter: response.headers["retry-after"])
+                }
+                log("claude reset availability unavailable; not retrying before \(clockTime(resetNextCheck))")
             }
         }
         return resetGrantSummary(resetGrants)
+    }
+    /// A server Retry-After longer than the normal interval is honoured in full; the usage cooldown is untouched.
+    static func noteResetFailure(retryAfter: String?, now: Date = Date()) {
+        let d = retryDelay(retryAfter: retryAfter, failures: 1, now: now)
+        resetNextCheck = now.addingTimeInterval(max(d, resetCheckInterval))
     }
 
     static func resetGrantSummary(_ block: [String: Any]?, now: Date = Date()) -> String {
@@ -439,10 +514,18 @@ enum Claude {
         var stored = load()
         if let c = stored, (c.expiresAt ?? .distantPast) <= now.addingTimeInterval(5 * 60), let renewed = renew() { stored = renewed }
         let api = readAPI(stored)
-        if let a = api, !a.windows.isEmpty { return a }
-        if var app = readApp(planLabel(stored)) {
-            app.note = api?.error ?? signInHint
+        if let a = api, !a.windows.isEmpty { lastGood = (stored?.accessToken ?? "", a); return a }
+        let reason = api?.error ?? signInHint
+        // Newest valid reading wins: a desktop sample older than the last good API reading must not replace it.
+        let good = lastGood(for: stored?.accessToken)
+        if var app = readApp(planLabel(stored)), app.dataAt > (good?.dataAt ?? .distantPast) {
+            app.note = reason
             return app
+        }
+        if var g = good {
+            g.lastKnown = true
+            g.note = reason
+            return g
         }
         var none = api ?? ProviderUsage(name: "Claude", plan: planLabel(stored))
         none.error = "Claude: no data — open the Claude app, or run `claude auth login`"

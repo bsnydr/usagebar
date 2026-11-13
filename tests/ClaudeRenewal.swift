@@ -8,9 +8,14 @@ func creds(_ seconds: Double) -> Claude.Creds {
     Claude.Creds(raw: ["claudeAiOauth": ["accessToken": "synthetic",
         "expiresAt": now.addingTimeInterval(seconds).timeIntervalSince1970 * 1000]])
 }
+// State files (cooldown, last good reading) go to a temp dir, never the user's real one.
+let stateTmp = NSTemporaryDirectory() + "usagebar-test-\(getpid())"
+Claude.stateDir = stateTmp
+func resetState() { try? FileManager.default.removeItem(atPath: stateTmp) }
+resetState()
 let live = ProviderUsage(name: "Claude", plan: "", windows: [
     UsageWindow(label: "Weekly", percent: 42, resetsAt: nil, approx: false)
-], source: "API")
+], source: "API", dataAt: now)
 let stale = ProviderUsage(name: "Claude", plan: "", windows: [
     UsageWindow(label: "Weekly", percent: 31, resetsAt: nil, approx: true)
 ], source: "Claude app", dataAt: now.addingTimeInterval(-4 * 86400))
@@ -39,11 +44,59 @@ _ = Claude.fetch(load: { nil }, renew: {
     fatalError("A missing sign-in must not launch login")
 }, readAPI: { _ in nil }, readApp: { _ in nil }, now: now)
 
+resetState()
 let fallback = Claude.fetch(load: { creds(-100) }, renew: { nil }, readAPI: { _ in
     ProviderUsage(name: "Claude", plan: "", error: Claude.signInHint)
 }, readApp: { _ in stale }, now: now)
 check(fallback.dataAt == stale.dataAt && fallback.note == Claude.signInHint,
       "Failed renewal must preserve sample age and explain the failure")
+
+// Stale-usage regression: a failing API must not let an older desktop sample replace the last good reading.
+resetState()
+_ = Claude.fetch(load: { creds(3600) }, renew: { nil }, readAPI: { _ in live }, readApp: { _ in nil }, now: now)
+let failing: (Claude.Creds?) -> ProviderUsage? = { _ in ProviderUsage(name: "Claude", plan: "", error: "Claude API is rate-limiting") }
+let kept = Claude.fetch(load: { creds(3600) }, renew: { nil }, readAPI: failing, readApp: { _ in stale }, now: now)
+check(kept.lastKnown && kept.windows.first?.percent == 42 && kept.dataAt == live.dataAt && kept.note == "Claude API is rate-limiting",
+      "Older desktop sample must not replace the last good API reading; flag it as last known with the reason")
+// ...but a genuinely newer desktop sample is used.
+var newer = stale
+newer.dataAt = now.addingTimeInterval(600)
+let usedApp = Claude.fetch(load: { creds(3600) }, renew: { nil }, readAPI: failing, readApp: { _ in newer }, now: now)
+check(usedApp.source == "Claude app" && !usedApp.lastKnown && usedApp.note != nil, "Newer desktop sample wins and keeps the failure note")
+// Account safety: another login (different token) must never be shown the previous account's reading.
+let otherLogin = Claude.Creds(raw: ["claudeAiOauth": ["accessToken": "other-synthetic",
+    "expiresAt": now.addingTimeInterval(3600).timeIntervalSince1970 * 1000]])
+let other = Claude.fetch(load: { otherLogin }, renew: { nil }, readAPI: failing, readApp: { _ in nil }, now: now)
+check(other.windows.isEmpty && !other.lastKnown, "A different login must not see the previous login's numbers")
+// ...and the cache is not on disk: nothing identifying or reading-shaped is persisted.
+check(!FileManager.default.fileExists(atPath: stateTmp + "/claude-last-good.json"), "Last good reading is memory only")
+
+// Backoff: Retry-After honoured and bounded, exponential without it, persisted, cleared on success.
+check(Claude.retryDelay(retryAfter: "900", failures: 1, now: now) == 900, "Honour Retry-After seconds")
+check(Claude.retryDelay(retryAfter: "5", failures: 1, now: now) == 60, "Floor Retry-After at a minute")
+check(Claude.retryDelay(retryAfter: "86400", failures: 1, now: now) == 86400, "A long server Retry-After is never shortened")
+check(Claude.retryDelay(retryAfter: "999999", failures: 1, now: now) == 999999, "A very long Retry-After is still honoured")
+let httpDate = DateFormatter()
+httpDate.locale = Locale(identifier: "en_US_POSIX"); httpDate.timeZone = TimeZone(identifier: "GMT")
+httpDate.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+check(Claude.retryDelay(retryAfter: httpDate.string(from: now.addingTimeInterval(1200)), failures: 1, now: now) == 1200, "Honour Retry-After HTTP date")
+check(Claude.retryDelay(retryAfter: nil, failures: 1, now: now) == 600, "Default first backoff is 10 minutes")
+check(Claude.retryDelay(retryAfter: nil, failures: 2, now: now) == 1200, "Backoff doubles")
+check(Claude.retryDelay(retryAfter: nil, failures: 20, now: now) == Claude.backoffCap, "Backoff is bounded")
+resetState()
+let until = Claude.noteFailure(retryAfter: "1800", now: now)
+check(until == now.addingTimeInterval(1800) && Claude.loadBackoff().until == until, "Cooldown persists across restarts")
+_ = Claude.noteFailure(retryAfter: nil, now: now)
+check(Claude.loadBackoff().failures == 2, "Consecutive failures accumulate")
+Claude.noteSuccess()
+check(Claude.loadBackoff().failures == 0 && Claude.blockedUntil < now, "Success clears the cooldown")
+// A reset-metadata failure uses its own cooldown and must not pause usage polling.
+Claude.noteResetFailure(retryAfter: "86400", now: now)
+check(Claude.resetNextCheck == now.addingTimeInterval(86400), "Long reset Retry-After honoured")
+check(Claude.blockedUntil < now && Claude.loadBackoff().failures == 0, "Reset failure must not start the usage cooldown")
+Claude.noteResetFailure(retryAfter: nil, now: now)
+check(Claude.resetNextCheck == now.addingTimeInterval(Claude.resetCheckInterval), "Reset failure waits at least the normal interval")
+resetState()
 
 let request = json(Claude.renewalInput)!
 check(request["type"] as? String == "control_request", "Renewal must never send a user prompt")
